@@ -2,6 +2,25 @@
 
 Plataforma de chat corporativo distribuído em tempo real com arquitetura serverless na AWS.
 
+<div style="display:flex; gap:6px; justify-content:center;">
+   <img src="https://img.shields.io/badge/Next.js-000000?logo=nextdotjs&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/AWS%20Cognito-FF9900?logo=amazonaws&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/API%20Gateway-FF4F8B?logo=amazonapigateway&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/AWS%20Lambda-FF9900?logo=awslambda&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/DynamoDB-4053D6?logo=amazondynamodb&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/SQS-FF9900?logo=amazonsqs&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/EventBridge-FF4F8B?logo=amazoneventbridge&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/SNS-FF9900?logo=amazonsns&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/Amazon%20S3-569A31?logo=amazons3&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/Amazon%20Bedrock-232F3E?logo=amazonaws&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/CloudWatch-FF9900?logo=amazoncloudwatch&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/X--Ray-FF9900?logo=amazonaws&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/Terraform-7B42BC?logo=terraform&logoColor=white" height="24" />
+  <img src="https://img.shields.io/badge/GitHub%20Actions-2088FF?logo=githubactions&logoColor=white" height="24" />
+</div>
+
+
 ## Arquitetura
 
 ```
