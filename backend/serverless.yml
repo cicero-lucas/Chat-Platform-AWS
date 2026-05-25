@@ -1,0 +1,390 @@
+service: aws-serverless-chat
+frameworkVersion: '3'
+
+plugins:
+  - serverless-plugin-typescript
+  - serverless-offline
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  tracing:
+    lambda: true
+    apiGateway: true
+  logs:
+    restApi: true
+    websocket: true
+  environment:
+    ENVIRONMENT: ${self:provider.stage}
+    DYNAMODB_MESSAGES_TABLE: ${self:service}-messages-${self:provider.stage}
+    DYNAMODB_USERS_TABLE: ${self:service}-users-${self:provider.stage}
+    DYNAMODB_ROOMS_TABLE: ${self:service}-rooms-${self:provider.stage}
+    DYNAMODB_CONNECTIONS_TABLE: ${self:service}-connections-${self:provider.stage}
+    SQS_MESSAGES_QUEUE_URL: !Ref MessagesQueue
+    SNS_NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+    S3_ATTACHMENTS_BUCKET: ${self:service}-attachments-${self:provider.stage}
+    WEBSOCKET_API_ENDPOINT: !Sub 'https://${WebsocketsApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}'
+    EVENT_BUS_NAME: ${self:service}-events-${self:provider.stage}
+    COGNITO_USER_POOL_ID: ${ssm:/chat/${self:provider.stage}/cognito/user-pool-id}
+    COGNITO_CLIENT_ID: ${ssm:/chat/${self:provider.stage}/cognito/client-id}
+    BEDROCK_MODEL_ID: anthropic.claude-3-haiku-20240307-v1:0
+    RATE_LIMIT_MESSAGES_PER_MINUTE: '60'
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - !GetAtt MessagesTable.Arn
+            - !Sub '${MessagesTable.Arn}/index/*'
+            - !GetAtt UsersTable.Arn
+            - !Sub '${UsersTable.Arn}/index/*'
+            - !GetAtt RoomsTable.Arn
+            - !Sub '${RoomsTable.Arn}/index/*'
+            - !GetAtt ConnectionsTable.Arn
+            - !Sub '${ConnectionsTable.Arn}/index/*'
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            - !GetAtt MessagesQueue.Arn
+            - !GetAtt MessagesDLQ.Arn
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource: !Ref NotificationsTopic
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+          Resource: !Sub 'arn:aws:s3:::${self:service}-attachments-${self:provider.stage}/*'
+        - Effect: Allow
+          Action:
+            - execute-api:ManageConnections
+          Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/${self:provider.stage}/POST/@connections/*'
+        - Effect: Allow
+          Action:
+            - events:PutEvents
+          Resource: !GetAtt EventBus.Arn
+        - Effect: Allow
+          Action:
+            - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+            - cloudwatch:GetMetricData
+            - cloudwatch:PutMetricData
+          Resource: '*'
+        - Effect: Allow
+          Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+          Resource: '*'
+
+functions:
+  sendMessage:
+    handler: src/functions/messages/sendMessage.handler
+    events:
+      - http:
+          path: /v1/rooms/{roomId}/messages
+          method: post
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref CognitoAuthorizer
+
+  getMessages:
+    handler: src/functions/messages/getMessages.handler
+    events:
+      - http:
+          path: /v1/rooms/{roomId}/messages
+          method: get
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref CognitoAuthorizer
+
+  processMessage:
+    handler: src/functions/messages/processMessage.handler
+    reservedConcurrency: 50
+    events:
+      - sqs:
+          arn: !GetAtt MessagesQueue.Arn
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+
+  uploadAttachment:
+    handler: src/functions/messages/uploadAttachment.handler
+    events:
+      - http:
+          path: /v1/attachments/upload-url
+          method: post
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref CognitoAuthorizer
+
+  wsConnect:
+    handler: src/functions/websocket/handlers.connectHandler
+    events:
+      - websocket:
+          route: $connect
+
+  wsDisconnect:
+    handler: src/functions/websocket/handlers.disconnectHandler
+    events:
+      - websocket:
+          route: $disconnect
+
+  wsMessage:
+    handler: src/functions/websocket/handlers.messageHandler
+    events:
+      - websocket:
+          route: $default
+
+  aiSummarize:
+    handler: src/functions/ai/handlers.summarizeHandler
+    timeout: 60
+    events:
+      - http:
+          path: /v1/rooms/{roomId}/ai/summarize
+          method: get
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref CognitoAuthorizer
+
+  aiSuggest:
+    handler: src/functions/ai/handlers.suggestHandler
+    timeout: 30
+    events:
+      - http:
+          path: /v1/rooms/{roomId}/ai/suggest
+          method: get
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref CognitoAuthorizer
+
+  adminMetrics:
+    handler: src/functions/admin/metrics.metricsHandler
+    events:
+      - http:
+          path: /v1/admin/metrics
+          method: get
+          cors: true
+          authorizer:
+            type: COGNITO_USER_POOLS
+            authorizerId: !Ref CognitoAuthorizer
+
+resources:
+  Resources:
+    MessagesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-messages-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: messageId
+            AttributeType: S
+          - AttributeName: roomId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+        KeySchema:
+          - AttributeName: messageId
+            KeyType: HASH
+          - AttributeName: roomId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: roomId-createdAt-index
+            KeySchema:
+              - AttributeName: roomId
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-users-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: email
+            AttributeType: S
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: email-index
+            KeySchema:
+              - AttributeName: email
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: rate-limit-index
+            KeySchema:
+              - AttributeName: pk
+                KeyType: HASH
+              - AttributeName: sk
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    RoomsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-rooms-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: roomId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: roomId
+            KeyType: HASH
+
+    ConnectionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-connections-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: connectionId
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: roomId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: connectionId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: userId-index
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: roomId-index
+            KeySchema:
+              - AttributeName: roomId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    MessagesDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-messages-dlq-${self:provider.stage}
+        MessageRetentionPeriod: 1209600
+
+    MessagesQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-messages-${self:provider.stage}.fifo
+        FifoQueue: true
+        ContentBasedDeduplication: true
+        VisibilityTimeout: 300
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt MessagesDLQ.Arn
+          maxReceiveCount: 3
+
+    NotificationsTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-notifications-${self:provider.stage}
+
+    EventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: ${self:service}-events-${self:provider.stage}
+
+    AttachmentsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-attachments-${self:provider.stage}
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders: ['*']
+              AllowedMethods: [GET, PUT, POST]
+              AllowedOrigins: ['*']
+              MaxAge: 3000
+        LifecycleConfiguration:
+          Rules:
+            - Id: DeleteOldAttachments
+              Status: Enabled
+              ExpirationInDays: 365
+
+    CognitoAuthorizer:
+      Type: AWS::ApiGateway::Authorizer
+      Properties:
+        Name: CognitoAuthorizer
+        Type: COGNITO_USER_POOLS
+        IdentitySource: method.request.header.Authorization
+        RestApiId: !Ref ApiGatewayRestApi
+        ProviderARNs:
+          - ${ssm:/chat/${self:provider.stage}/cognito/user-pool-arn}
+
+    MessagesSentAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-high-error-rate-${self:provider.stage}
+        MetricName: Errors
+        Namespace: AWS/Lambda
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 2
+        Threshold: 10
+        ComparisonOperator: GreaterThanThreshold
+        AlarmActions:
+          - !Ref NotificationsTopic
+
+    DLQAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-dlq-messages-${self:provider.stage}
+        MetricName: ApproximateNumberOfMessagesVisible
+        Namespace: AWS/SQS
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt MessagesDLQ.QueueName
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 1
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        AlarmActions:
+          - !Ref NotificationsTopic

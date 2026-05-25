@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: dynamodb-local
+    ports:
+      - "8000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/shell/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  dynamodb-admin:
+    image: aaronshaf/dynamodb-admin:latest
+    container_name: dynamodb-admin
+    ports:
+      - "8001:8001"
+    environment:
+      DYNAMO_ENDPOINT: http://dynamodb-local:8000
+    depends_on:
+      dynamodb-local:
+        condition: service_healthy
+
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs,sns,s3,events,cognito-idp,lambda
+      DEBUG: 0
+      DATA_DIR: /tmp/localstack/data
+      LAMBDA_EXECUTOR: local
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./infrastructure/localstack:/etc/localstack/init/ready.d
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: chat-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:4000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:4001
+    depends_on:
+      - localstack
+
+networks:
+  default:
+    name: chat-network
